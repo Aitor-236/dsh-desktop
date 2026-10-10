@@ -20,6 +20,8 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 
+const { inspectHost } = require('./host-probe')
+
 const DEFAULT_FRESHNESS_MS = 15 * 60 * 1000
 
 function dshHome(env = process.env) {
@@ -95,9 +97,45 @@ function inspectActivity({ home = dshHome(), freshnessMs = DEFAULT_FRESHNESS_MS,
   return { activeTasks: sessions.length > 0, scheduledTasks: false, sessions }
 }
 
-/** 探测函数，签名与上游 DesktopQuitConfirmation 的 inspect 一致。 */
+/**
+ * 探测函数，签名与上游 DesktopQuitConfirmation 的 inspect 一致。
+ *
+ * 优先问 Host（`session/list` 的 running 是权威答案），投影缓存负责两件事：
+ * 补上 Host 列表不体现的排队消息/待回答问题，并在 Host 不可用时兜底。
+ *
+ * @param {object} [options]
+ * @param {string|(() => string|null)} [options.url] 带 token 的启动地址（每次探测时求值）
+ */
 function createActivityProbe(options = {}) {
-  return async () => inspectActivity(options)
+  const { url, fetchImpl, timeoutMs, onHostError } = options
+  const cacheOptions = { home: options.home, freshnessMs: options.freshnessMs, now: options.now }
+  let warned = false
+
+  return async () => {
+    const cache = inspectActivity(cacheOptions)
+    const launchUrl = typeof url === 'function' ? url() : url
+    if (!launchUrl) return Object.assign({}, cache, { source: 'cache' })
+
+    try {
+      const host = await inspectHost({ launchUrl, fetchImpl, timeoutMs })
+      const cacheOnly = cache.sessions.filter(
+        (session) => !host.sessions.some((hostSession) => hostSession.id === session.id),
+      )
+      return {
+        activeTasks: host.activeTasks || cache.activeTasks,
+        scheduledTasks: false,
+        sessions: [...host.sessions, ...cacheOnly],
+        source: 'host',
+      }
+    } catch (error) {
+      if (!warned) {
+        warned = true
+        console.warn(`host probe unavailable, falling back to the projection cache: ${error.message}`)
+      }
+      if (typeof onHostError === 'function') onHostError(error)
+      return Object.assign({}, cache, { source: 'cache', hostError: error })
+    }
+  }
 }
 
 /** 给探测加截止时间；超时返回 fallback（上游对超时的处理是当作有任务在跑）。 */

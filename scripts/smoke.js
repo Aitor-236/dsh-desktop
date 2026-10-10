@@ -7,6 +7,7 @@
  */
 
 const { DshServer, findDsh } = require('../src/supervisor')
+const { inspectHost, callRemote, mintSessionCookie } = require('../src/host-probe')
 
 function check(label, actual, expected) {
   const ok = actual === expected
@@ -44,6 +45,25 @@ async function main() {
       const authed = await fetch(`${origin}/`, { headers: { cookie: setCookie.split(';')[0] } })
       check('带 cookie 访问根路径', authed.status, 200)
     }
+
+    // 真实 Host 探测：用启动 token 换 cookie 再走 Remote 的 session/list
+    const host = await inspectHost({ launchUrl: started.url })
+    console.log(`✓ Host Remote session/list 可用（source=${host.source}）`)
+    check('空闲时没有"运行中"会话', host.activeTasks, false)
+    check('定时任务（默认 web profile 未挂载 Schedule）', host.scheduledTasks, false)
+
+    // 契约检查：真实响应里每一行都必须带布尔型 running（这是探测的唯一依据）
+    const cookie = await mintSessionCookie(started.url)
+    const listed = await callRemote({
+      origin,
+      cookie,
+      endpoint: 'session/list',
+      args: { _request: {} },
+    })
+    const rows = Array.isArray(listed.items) ? listed.items : []
+    const everyRowHasRunning = rows.every((row) => typeof row.running === 'boolean')
+    console.log(`✓ session/list 返回 ${rows.length} 条会话；字段：${rows.length > 0 ? Object.keys(rows[0]).sort().join(',') : '(无会话)'}`)
+    check('每行都带布尔型 running', everyRowHasRunning, true)
   } finally {
     await server.stop()
     console.log('服务已停止')

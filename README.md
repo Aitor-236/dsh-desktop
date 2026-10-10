@@ -35,6 +35,7 @@ npm run pack         # 只解包到 dist/linux-unpacked，便于快速验证
 - `src/main.js`：Electron 主进程（单实例、窗口、托盘、菜单、启动页、导航拦截、右键菜单、退出时回收服务）
 - `src/locale.js` / `src/labels.js`：界面文案（前者逐字取自上游，后者是本移植版的补充条目）
 - `src/background-notice.js` / `src/quit-confirmation.js` / `src/activity.js`：关闭即隐藏、退出确认与任务探测
+- `src/host-probe.js`：直接问 dsh 的 Remote 接口（启动 token 换 cookie → `POST /api/session/list`）
 - `src/command-management.js` / `src/updates.js`：管理 dsh 命令、检查并升级 dsh
 - `src/diagnostics.js` / `src/fatal-recovery.js` / `src/profile-recovery.js`：崩溃报告、原生恢复流程、备份 profile patch
 - `src/navigation.js` / `src/context-menu.js`：导航策略与右键编辑菜单
@@ -70,7 +71,7 @@ npm run pack         # 只解包到 dist/linux-unpacked，便于快速验证
 
 移植中的三处差异，都是环境限制而非取舍：
 
-1. **任务探测的来源**：上游通过私有 IPC 询问它自己拉起的 Host（desktop profile）。我们托管的是标准 `dsh web` profile，没有那条通道，于是改读 dsh 自己写的会话投影缓存（`~/.dsh/storages/session_projcache/sessions/*.json`）里的 `turnBoundary.openTurnStartSeq`、`openStep`/`pendingCalls`、排队 `inbox`、待回答 `userQuestions`，并用文件 mtime 做新鲜度门槛。定时任务（Schedule overlay）默认不在 web profile 里挂载，因此 `scheduledTasks` 恒为 false。
+1. **任务探测的来源**：上游通过私有 IPC 询问它自己拉起的 Host（desktop profile）。我们托管的是标准 `dsh web` profile，没有那条通道，于是走它自己的 Remote 接口：用启动 token 换一次会话 cookie，再 `POST /api/session/list`，以每行的 `running` 字段为权威答案（真实响应里的字段与 `running` 的布尔类型由 `npm run smoke` 对着运行中的服务校验）。投影缓存（`~/.dsh/storages/session_projcache/sessions/*.json` 的 `openTurnStartSeq`、`openStep`/`pendingCalls`、排队 `inbox`、待回答 `userQuestions`）继续承担两件事：补上 Host 列表不体现的排队消息与待回答，以及 Host 不可用时的兜底。定时任务（Schedule overlay）默认不在 web profile 里挂载，因此 `scheduledTasks` 恒为 false。
 2. **应用菜单的呈现**：Windows 版把菜单做进自定义标题栏。我们保留系统标题栏（Web 界面自带顶栏，叠加标题栏会遮挡），菜单默认隐藏，按 <kbd>Alt</kbd> 或右键标题栏即可展开。
 3. **检查更新的对象**：上游检查桌面应用自身的发布源。本项目的发布源还不存在，所以这个入口用来检查并一键升级 `dsh` 本体（对比 npm latest，升级后自动重启服务）。
 

@@ -72,7 +72,8 @@ const rendererConsole = new RendererConsoleTail()
 
 const messages = () => messagesFor(localeId)
 const labels = () => labelsFor(localeId)
-const activityProbe = createActivityProbe()
+// 退出确认前会问一次 Host（走它自己的 session/list），拿不到再退回投影缓存
+const activityProbe = createActivityProbe({ url: () => (server && server.url) || null })
 
 function showMessageBox(options) {
   return dialog.showMessageBox(options)
