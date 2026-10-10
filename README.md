@@ -47,13 +47,26 @@ npm run pack         # 只解包到 dist/linux-unpacked，便于快速验证
 
 应用自身更新走 `electron-updater`（与上游桌面版同一套依赖），更新源是 GitHub Releases：
 
+**推荐：打 tag 让 CI 发布**（不需要任何个人 token，[工作流](.github/workflows/release.yml) 用仓库自带的 `GITHUB_TOKEN`）：
+
 ```sh
-# 1. 改 package.json 里的 version（例如 0.2.0 → 0.2.1）
-# 2. 用 token 发布：构建 AppImage + deb，并把资产与 latest-linux.yml 一起传上去
-GH_TOKEN=<你的 GitHub token> npm run release
+npm version patch        # 改版本 + 提交 + 打 tag v0.2.1（工作区需干净）
+git push --follow-tags   # 推提交与 tag，CI 随即构建并发布
 ```
 
-打包会生成两份元数据：包内的 `resources/app-update.yml`（指向 `Aitor-236/dsh-desktop`）和 `dist/latest-linux.yml`（版本、sha512、blockMap）。已安装的应用就靠这个 feed 判断有没有新版本。所以**发布请用 `npm run release`，不要手工把 `dist/` 里的文件拖进 release**——手工上传的文件名与 feed 里记录的会对不上。
+CI 会：安装依赖 → 校验 tag 与 `package.json` 版本一致（不一致直接失败，避免发出一版对不上号的更新）→ 跑单测 → `electron-builder --publish always` 构建 AppImage + deb 并发布到 Releases。在 Actions 页面手动触发同一工作流则**只构建不发布**，产物以 `linux-packages` 附件留档。
+
+**备选：本地发布**（需要一次 GitHub token，fine-grained 的 `Contents: Read and write` 或经典的 `public_repo`）：
+
+```sh
+npm version patch --no-git-tag-version
+git add -A && git commit -m "chore: release 0.2.1" && git push
+GH_TOKEN=<你的 token> npm run release
+```
+
+两种方式都会生成两份元数据：包内的 `resources/app-update.yml`（指向 `Aitor-236/dsh-desktop`）和 `dist/latest-linux.yml`（版本、sha512、blockMap）。已安装的应用就靠这个 feed 判断有没有新版本，所以**不要手工把 `dist/` 里的文件拖进 release**——手工上传的文件名与 feed 里记录的会对不上。
+
+发布后自检：release 标记为 **Latest**（不能是 Draft / Pre-release），资产含 `DeepSeek-Harness-<版本>-x86_64.AppImage`、`DeepSeek-Harness-<版本>-amd64.deb`、`latest-linux.yml`；然后在装了旧版的机器上点「检查更新…」。
 
 行为与限制：
 
