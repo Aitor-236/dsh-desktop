@@ -11,6 +11,8 @@ publish:
   provider: github
   owner: Aitor-236
   repo: dsh-desktop
+  # 默认值是 draft，而草稿 release 对 electron-updater 不可见 —— 必须是正式发布
+  releaseType: release
 
 files:
   - src/**/*
