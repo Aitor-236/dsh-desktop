@@ -6,6 +6,12 @@ directories:
   output: dist
   buildResources: build
 
+# GitHub Releases 作为更新源：打包时会生成 app-update.yml 与 latest-linux.yml
+publish:
+  provider: github
+  owner: Aitor-236
+  repo: dsh-desktop
+
 files:
   - src/**/*
   - package.json
@@ -27,10 +33,10 @@ linux:
       Keywords: ai;agent;deepseek;dsh;harness;chat;code;
 
 appImage:
-  artifactName: ${productName}-${version}-${arch}.AppImage
+  artifactName: DeepSeek-Harness-${version}-${arch}.AppImage
 
 deb:
-  artifactName: ${productName}-${version}-${arch}.deb
+  artifactName: DeepSeek-Harness-${version}-${arch}.deb
   depends:
     - libgtk-3-0
     - libnotify4

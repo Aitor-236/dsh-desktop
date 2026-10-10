@@ -20,10 +20,14 @@
     "icons": "python3 scripts/make-icons.py",
     "fix-sandbox": "sudo chown root:root node_modules/electron/dist/chrome-sandbox && sudo chmod 4755 node_modules/electron/dist/chrome-sandbox",
     "pack": "electron-builder --dir",
-    "dist": "electron-builder --linux AppImage deb"
+    "dist": "electron-builder --linux AppImage deb",
+    "release": "electron-builder --linux AppImage deb --publish always"
   },
   "devDependencies": {
     "electron": "^44.7.0",
     "electron-builder": "^26.15.3"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
   }
 }

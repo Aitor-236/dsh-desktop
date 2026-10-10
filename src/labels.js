@@ -30,6 +30,8 @@ const LABELS = {
     noUpdateSource: '无法访问 npm registry，请检查网络或代理设置。',
     updateDshDetail: '升级会替换全局安装的 dsh（npm i -g @deepseek-ai/dsh@latest），随后自动重启服务。',
     updateFailed: '升级失败，请查看 npm 输出后重试。',
+    updateUnavailableInDev: '开发模式（未打包）无法检查应用更新，请使用打包后的 AppImage 或 deb。',
+    checkDshUpdates: '检查 dsh 更新…',
   },
   en: {
     aboutTitle: 'About DeepSeek Harness',
@@ -55,6 +57,9 @@ const LABELS = {
     noUpdateSource: 'Cannot reach the npm registry. Check the network or proxy settings.',
     updateDshDetail: 'Upgrading replaces the globally installed dsh (npm i -g @deepseek-ai/dsh@latest), then restarts the service.',
     updateFailed: 'Upgrade failed. Check the npm output and retry.',
+    updateUnavailableInDev:
+      'Application updates need a packaged build. Run the AppImage or the installed deb to check for updates.',
+    checkDshUpdates: 'Check dsh Updates…',
   },
 }
 

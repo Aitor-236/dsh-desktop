@@ -37,10 +37,34 @@ npm run pack         # 只解包到 dist/linux-unpacked，便于快速验证
 - `src/background-notice.js` / `src/quit-confirmation.js` / `src/activity.js`：关闭即隐藏、退出确认与任务探测
 - `src/host-probe.js`：直接问 dsh 的 Remote 接口（启动 token 换 cookie → `POST /api/session/list`）
 - `src/command-management.js` / `src/updates.js`：管理 dsh 命令、检查并升级 dsh
+- `src/app-updater.js`：应用自身更新（electron-updater + GitHub Releases，含任务确认与重试）
 - `src/diagnostics.js` / `src/fatal-recovery.js` / `src/profile-recovery.js`：崩溃报告、原生恢复流程、备份 profile patch
 - `src/navigation.js` / `src/context-menu.js`：导航策略与右键编辑菜单
 - `src/autostart.js`：XDG autostart 开关（托盘菜单里的「开机自启」）
 - `scripts/smoke.js`：端到端自检；`test/`：`node --test` 单元测试
+
+## 发布与自动更新
+
+应用自身更新走 `electron-updater`（与上游桌面版同一套依赖），更新源是 GitHub Releases：
+
+```sh
+# 1. 改 package.json 里的 version（例如 0.2.0 → 0.2.1）
+# 2. 用 token 发布：构建 AppImage + deb，并把资产与 latest-linux.yml 一起传上去
+GH_TOKEN=<你的 GitHub token> npm run release
+```
+
+打包会生成两份元数据：包内的 `resources/app-update.yml`（指向 `Aitor-236/dsh-desktop`）和 `dist/latest-linux.yml`（版本、sha512、blockMap）。已安装的应用就靠这个 feed 判断有没有新版本。所以**发布请用 `npm run release`，不要手工把 `dist/` 里的文件拖进 release**——手工上传的文件名与 feed 里记录的会对不上。
+
+行为与限制：
+
+- 检查、下载、安装三步都要用户确认，开关与上游一致（`autoDownload=false`、`autoInstallOnAppQuit=false`、`allowPrerelease=true`、`allowDowngrade=false`）
+- 安装前先确认任务状态：有会话在跑（或探测不到状态）时弹「仍有进行中的任务」，确认后先停 dsh 服务再交给 electron-updater 重启
+- 下载进度显示在托盘菜单和 tooltip 上；下载完成后可直接「安装并重启」
+- **AppImage** 原地替换自身；**deb** 由 electron-updater 用 `dpkg -i`（失败回退 `apt-get install -f`）安装，过程中会请求提权
+- 仓库需要公开：私有仓库要往应用里塞 token 才能检查更新，不建议
+- 下载缓存位于 `~/.cache/dsh-desktop-updater`；开发模式（`npm start`）没有更新源，菜单会提示需要打包版本
+
+菜单里有两个入口：「检查更新…」查应用自身，「检查 dsh 更新…」查 `dsh` 本体的 npm 版本（我们自己加的，因为这里不随包捆绑 dsh）。
 
 ## 设计要点
 
@@ -62,6 +86,7 @@ npm run pack         # 只解包到 dist/linux-unpacked，便于快速验证
 | 托盘 | 图标常驻、tooltip 为产品名、单击显示窗口、菜单含「打开 / 退出」 | 相同，并额外提供服务状态、重启服务、打开日志、开机自启 |
 | 单实例 | 第二份启动聚焦已有窗口 | 相同 |
 | 应用菜单 | 关于 / 检查更新 / 管理 dsh 命令… / 刷新 / 隐藏 DevTools（F12、Ctrl+Shift+I） | 相同条目（外加「重启服务」「打开日志」，因为 Linux 没有系统托盘菜单栏） |
+| 检查更新 | 检查应用自身发布，下载与安装都要确认，安装前确认任务状态 | 相同（electron-updater + GitHub Releases）；另加「检查 dsh 更新…」用于 dsh 本体 |
 | 本地化 | `zh-CN` / `en`，跟随系统 | 相同，165 条文案与上游逐字一致 |
 | 关机 / 注销 | 用系统事件标记，确认框不挡关机 | 相同（`powerMonitor` 的 `shutdown` 事件） |
 | 导航策略 | 只有应用自身来源留在窗口内；外链交给系统浏览器；其它协议拦截 | 相同 |
@@ -73,7 +98,7 @@ npm run pack         # 只解包到 dist/linux-unpacked，便于快速验证
 
 1. **任务探测的来源**：上游通过私有 IPC 询问它自己拉起的 Host（desktop profile）。我们托管的是标准 `dsh web` profile，没有那条通道，于是走它自己的 Remote 接口：用启动 token 换一次会话 cookie，再 `POST /api/session/list`，以每行的 `running` 字段为权威答案（真实响应里的字段与 `running` 的布尔类型由 `npm run smoke` 对着运行中的服务校验）。投影缓存（`~/.dsh/storages/session_projcache/sessions/*.json` 的 `openTurnStartSeq`、`openStep`/`pendingCalls`、排队 `inbox`、待回答 `userQuestions`）继续承担两件事：补上 Host 列表不体现的排队消息与待回答，以及 Host 不可用时的兜底。定时任务（Schedule overlay）默认不在 web profile 里挂载，因此 `scheduledTasks` 恒为 false。
 2. **应用菜单的呈现**：Windows 版把菜单做进自定义标题栏。我们保留系统标题栏（Web 界面自带顶栏，叠加标题栏会遮挡），菜单默认隐藏，按 <kbd>Alt</kbd> 或右键标题栏即可展开。
-3. **检查更新的对象**：上游检查桌面应用自身的发布源。本项目的发布源还不存在，所以这个入口用来检查并一键升级 `dsh` 本体（对比 npm latest，升级后自动重启服务）。
+3. **不捆绑 dsh 运行时**：上游桌面版自带 Node/pnpm/Python 运行时并随包发布，这里的 dsh 用系统里 `npm i -g` 装的那份，因此额外提供「检查 dsh 更新…」（对比 npm latest，一键升级并重启服务）。
 
 ## 状态与配置
 

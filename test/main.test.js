@@ -251,6 +251,8 @@ test('主进程接线：上游窗口尺寸、托盘、加载就绪地址、退�
     const applicationMenu = JSON.stringify(record.menuTemplate)
     assert.match(applicationMenu, /管理 dsh 命令…/, '应用菜单应含“管理 dsh 命令…”')
     assert.match(applicationMenu, /检查更新…/, '应用菜单应含“检查更新…”')
+    assert.match(applicationMenu, /检查 dsh 更新…/, '应用菜单应含“检查 dsh 更新…”')
+    assert.equal(record.pathRequests.includes('logs'), true)
 
     assert.ok(record.pathRequests.includes('userData'), '关闭提示标记应放在 userData 下')
     assert.ok(record.pathRequests.includes('logs'), '崩溃报告应写在 logs 目录')

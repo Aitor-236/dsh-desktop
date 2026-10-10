@@ -26,6 +26,7 @@ const { navigationDecision, windowOpenDecision } = require('./navigation')
 const { contextMenuTemplate } = require('./context-menu')
 const { FatalRecovery } = require('./fatal-recovery')
 const { disableProfilePatches } = require('./profile-recovery')
+const { AppUpdateFlow } = require('./app-updater')
 
 const APP_NAME = 'DeepSeek Harness'
 const ICON_FILE = path.join(__dirname, '..', 'build', 'icon.png')
@@ -68,6 +69,7 @@ let cachedDshVersion = null
 let fatalRecovery = null
 let logsDir = null
 let serviceReady = false
+let appUpdateFlow = null
 const rendererConsole = new RendererConsoleTail()
 
 const messages = () => messagesFor(localeId)
@@ -149,7 +151,25 @@ function updateTrayMenu() {
   const m = messages()
   const l = labels()
   const running = Boolean(server && server.running)
-  tray.setToolTip(m.aboutProduct)
+  const updateState = appUpdateFlow ? appUpdateFlow.state : { phase: 'idle' }
+  const updateItem =
+    updateState.phase === 'downloading'
+      ? [{ label: format(m.updateDownloading, { percent: updateState.percent }), enabled: false }]
+      : updateState.phase === 'checking'
+        ? [{ label: m.updateChecking, enabled: false }]
+        : updateState.phase === 'ready'
+          ? [
+              {
+                label: m.installAndRestart,
+                click: () => void appUpdateFlow.install(updateState.version),
+              },
+            ]
+          : []
+  tray.setToolTip(
+    updateState.phase === 'downloading'
+      ? `${m.aboutProduct}（${format(m.updateDownloading, { percent: updateState.percent })}）`
+      : m.aboutProduct,
+  )
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: m.openApplication, click: () => showWindow() },
@@ -157,6 +177,7 @@ function updateTrayMenu() {
       { label: `${l.serviceState}: ${running ? l.stateRunning : l.stateStopped}`, enabled: false },
       { label: l.restartService, click: () => void restartServer() },
       { label: l.openServiceLog, click: () => void shell.openPath(LOG_FILE) },
+      ...updateItem,
       { type: 'separator' },
       {
         label: l.autostart,
@@ -218,7 +239,8 @@ function installMenu() {
         submenu: [
           { label: m.aboutMenu, click: () => void showAbout() },
           { type: 'separator' },
-          { label: m.checkUpdatesMenu, click: () => void runUpdateCheck() },
+          { label: m.checkUpdatesMenu, click: () => void runAppUpdateCheck() },
+          { label: l.checkDshUpdates, click: () => void runUpdateCheck() },
           { label: m.cliCommandMenu, click: () => void openCommandManager() },
           { type: 'separator' },
           { label: l.restartService, click: () => void restartServer() },
@@ -284,6 +306,31 @@ async function runUpdateCheck() {
     },
   })
   return result
+}
+
+/** 应用自身更新：打包后走 electron-updater（GitHub Releases）。 */
+async function runAppUpdateCheck() {
+  if (!appUpdateFlow) {
+    const l = labels()
+    await showMessageBoxForWindow({
+      type: 'info',
+      title: messages().updateCheckTitle,
+      message: l.updateUnavailableInDev,
+      buttons: [l.ok],
+    })
+    return
+  }
+  return appUpdateFlow.check()
+}
+
+function createAppUpdater() {
+  if (!app.isPackaged) return null
+  try {
+    return require('electron-updater').autoUpdater
+  } catch (error) {
+    console.warn('app updater: electron-updater is unavailable', error)
+    return null
+  }
 }
 
 async function openCommandManager() {
@@ -453,6 +500,23 @@ async function boot() {
   process.on('unhandledRejection', (reason) =>
     reportFatal(reason instanceof Error ? reason : new Error(String(reason)), 'main'),
   )
+
+  appUpdateFlow = new AppUpdateFlow({
+    updater: createAppUpdater(),
+    showMessage: (options) => showMessageBox(options),
+    messages,
+    labels,
+    isPackaged: app.isPackaged,
+    currentVersion: app.getVersion(),
+    // 服务没跑就没有任务可中断；跑着才去问 Host
+    inspectActivity: async () => (server && server.running ? inspectForQuit() : { activeTasks: false }),
+    prepareInstall: async () => {
+      // 安装前先停掉 dsh 服务，并阻止退出确认框在安装过程中弹出
+      quitting = true
+      if (server) await server.stop()
+    },
+    onStateChange: () => updateTrayMenu(),
+  })
 
   backgroundNotice = new BackgroundNotice({
     markerPath: path.join(app.getPath('userData'), 'background-close-confirmed'),
