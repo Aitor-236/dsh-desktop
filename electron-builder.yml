@@ -1,0 +1,40 @@
+appId: io.github.aitor236.dsh-desktop
+productName: DeepSeek Harness
+copyright: Copyright © 2026 Aitor
+
+directories:
+  output: dist
+  buildResources: build
+
+files:
+  - src/**/*
+  - package.json
+
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Development
+  icon: build/icons
+  executableName: dsh-desktop
+  syncDesktopName: true
+  synopsis: DeepSeek Harness 桌面端（dsh web 的 Linux 桌面壳）
+  description: DeepSeek Harness（dsh）的 Linux 桌面壳：内置管理 dsh web 服务，自启动、托盘常驻、关闭到托盘、开机自启、一键重启与日志查看。
+  desktop:
+    entry:
+      Name: DeepSeek Harness
+      Comment: DeepSeek Harness（dsh）智能体桌面端
+      Keywords: ai;agent;deepseek;dsh;harness;chat;code;
+
+appImage:
+  artifactName: ${productName}-${version}-${arch}.AppImage
+
+deb:
+  artifactName: ${productName}-${version}-${arch}.deb
+  depends:
+    - libgtk-3-0
+    - libnotify4
+    - libnss3
+    - libxss1
+    - libxtst6
+    - xdg-utils

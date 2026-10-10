@@ -1,0 +1,29 @@
+{
+  "name": "dsh-desktop",
+  "productName": "DeepSeek Harness",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness（dsh）的 Linux 桌面壳：内置 dsh web 服务、托盘、单实例、开机自启",
+  "private": true,
+  "license": "MIT",
+  "author": {
+    "name": "Aitor",
+    "email": "aitor.x@outlook.com"
+  },
+  "homepage": "https://github.com/deepseek-ai/deepseek-harness",
+  "desktopName": "dsh-desktop.desktop",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "start:no-sandbox": "electron --no-sandbox .",
+    "smoke": "node scripts/smoke.js",
+    "test": "node --test test/*.test.js",
+    "icons": "python3 scripts/make-icons.py",
+    "fix-sandbox": "sudo chown root:root node_modules/electron/dist/chrome-sandbox && sudo chmod 4755 node_modules/electron/dist/chrome-sandbox",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --linux AppImage deb"
+  },
+  "devDependencies": {
+    "electron": "^44.7.0",
+    "electron-builder": "^26.15.3"
+  }
+}
