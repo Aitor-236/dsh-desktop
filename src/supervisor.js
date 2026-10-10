@@ -85,6 +85,11 @@ class DshServer extends EventEmitter {
     return this.child !== null
   }
 
+  /** 最近的输出尾部，用于把失败原因带进诊断报告。 */
+  get tailText() {
+    return this.tail.join('\n')
+  }
+
   _openLog() {
     if (!this.logFile) return
     try {

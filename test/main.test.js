@@ -45,6 +45,10 @@ function createElectronStub(record) {
         setWindowOpenHandler: (handler) => {
           record.windowOpenHandler = handler
         },
+        on: (event, handler) => {
+          record.webContentsHandlers[event] = handler
+        },
+        getURL: () => record.currentUrl,
         reload: () => {
           record.reloads += 1
         },
@@ -108,6 +112,12 @@ function createElectronStub(record) {
       quit: () => {
         record.quitCalls += 1
       },
+      exit: () => {
+        record.exitCalls += 1
+      },
+      relaunch: () => {
+        record.relaunches += 1
+      },
       on: (event, handler) => {
         appHandlers[event] = handler
       },
@@ -119,7 +129,12 @@ function createElectronStub(record) {
       setApplicationMenu: (template) => {
         record.menuTemplate = template
       },
-      buildFromTemplate: (template) => template,
+      buildFromTemplate: (template) =>
+        Object.assign(template, {
+          popup: (options) => {
+            record.popups.push(options)
+          },
+        }),
     },
     nativeImage: { createFromPath: () => ({ resize: () => ({}) }) },
     powerMonitor: {
@@ -157,16 +172,21 @@ async function loadMain({ liveSessions = false, dialogResponses = [] } = {}) {
     loadedUrls: [],
     windowHandlers: {},
     windowOnce: {},
+    webContentsHandlers: {},
     trayHandlers: {},
     powerHandlers: {},
     dialogs: [],
     dialogResponses,
+    popups: [],
     pathRequests: [],
     userDataDir: path.join(workDir, 'user-data'),
     quitCalls: 0,
+    exitCalls: 0,
+    relaunches: 0,
     trayDestroyed: 0,
     hides: 0,
     reloads: 0,
+    currentUrl: 'http://127.0.0.1:39998/',
   }
   const electronStub = createElectronStub(record)
 
@@ -233,7 +253,36 @@ test('主进程接线：上游窗口尺寸、托盘、加载就绪地址、退�
     assert.match(applicationMenu, /检查更新…/, '应用菜单应含“检查更新…”')
 
     assert.ok(record.pathRequests.includes('userData'), '关闭提示标记应放在 userData 下')
+    assert.ok(record.pathRequests.includes('logs'), '崩溃报告应写在 logs 目录')
     assert.ok(record.powerHandlers.shutdown, '应监听系统关机，避免用确认框挡住注销')
+    assert.ok(record.webContentsHandlers['will-navigate'], '应拦截导航')
+    assert.ok(record.webContentsHandlers['context-menu'], '应提供右键菜单')
+    assert.ok(record.webContentsHandlers['console-message'], '应收集渲染进程错误日志')
+
+    // 导航策略：外链被拦下并交给系统浏览器，危险协议直接被拦
+    let navigated = false
+    let preventedNav = false
+    record.webContentsHandlers['will-navigate'](
+      { preventDefault: () => (preventedNav = true) },
+      'https://github.com/deepseek-ai/deepseek-harness',
+    )
+    assert.equal(preventedNav, true, '外链不应在窗口内打开')
+    preventedNav = false
+    record.webContentsHandlers['will-navigate'](
+      { preventDefault: () => (preventedNav = true) },
+      'http://127.0.0.1:39998/settings',
+    )
+    assert.equal(preventedNav, false, '同源导航应放行')
+    assert.equal(navigated, false)
+
+    // 右键菜单：可编辑参数才弹
+    record.webContentsHandlers['context-menu']({}, { isEditable: false, selectionText: '' })
+    assert.equal(record.popups.length, 0)
+    record.webContentsHandlers['context-menu'](
+      {},
+      { isEditable: true, selectionText: '', editFlags: { canCopy: true } },
+    )
+    assert.equal(record.popups.length, 1, '可编辑区域应弹出编辑菜单')
 
     // 无任务在跑：退出不弹框，直接回收服务后退出
     const beforeQuit = electronStub.app.handlers['before-quit']

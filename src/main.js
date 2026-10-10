@@ -21,6 +21,11 @@ const { QuitConfirmation } = require('./quit-confirmation')
 const { createActivityProbe, withDeadline } = require('./activity')
 const commandManagement = require('./command-management')
 const { checkForUpdates, fetchLatestVersion, upgradeDsh } = require('./updates')
+const { RendererConsoleTail, pruneCrashReports, writeCrashReport } = require('./diagnostics')
+const { navigationDecision, windowOpenDecision } = require('./navigation')
+const { contextMenuTemplate } = require('./context-menu')
+const { FatalRecovery } = require('./fatal-recovery')
+const { disableProfilePatches } = require('./profile-recovery')
 
 const APP_NAME = 'DeepSeek Harness'
 const ICON_FILE = path.join(__dirname, '..', 'build', 'icon.png')
@@ -60,6 +65,10 @@ let backgroundNotice = null
 let quitConfirmation = null
 let localeId = 'en'
 let cachedDshVersion = null
+let fatalRecovery = null
+let logsDir = null
+let serviceReady = false
+const rendererConsole = new RendererConsoleTail()
 
 const messages = () => messagesFor(localeId)
 const labels = () => labelsFor(localeId)
@@ -94,6 +103,26 @@ function relaunchCommand() {
   if (process.env.APPIMAGE) return process.env.APPIMAGE
   if (app.isPackaged) return process.execPath
   return null
+}
+
+function appFacts() {
+  return {
+    name: APP_NAME,
+    version: app.getVersion(),
+    platform: process.platform,
+    arch: process.arch,
+    electron: process.versions.electron,
+    node: process.versions.node,
+    locale: localeId,
+  }
+}
+
+function reportFatal(error, source) {
+  if (!fatalRecovery) {
+    console.error('fatal failure before recovery was ready', error)
+    return
+  }
+  void fatalRecovery.report(error, source)
 }
 
 function dshVersion() {
@@ -282,8 +311,31 @@ function createWindow() {
   win.loadURL(SPLASH_HTML)
   win.once('ready-to-show', () => win.show())
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:/.test(url)) void shell.openExternal(url)
+    if (windowOpenDecision(url) === 'external') void shell.openExternal(url)
     return { action: 'deny' }
+  })
+  // 只有应用自己的来源留在窗口里；外链交给系统浏览器，其它协议拦掉
+  win.webContents.on('will-navigate', (event, url) => {
+    const decision = navigationDecision(win.webContents.getURL(), url)
+    if (decision === 'allow') return
+    event.preventDefault()
+    if (decision === 'external') void shell.openExternal(url)
+  })
+  // 右键菜单：Electron 默认不提供，这里按上游补上编辑/复制
+  win.webContents.on('context-menu', (_event, params) => {
+    const template = contextMenuTemplate({
+      isEditable: Boolean(params && params.isEditable),
+      selectionText: params && params.selectionText,
+      editFlags: (params && params.editFlags) || {},
+      messages: messages(),
+    })
+    if (template.length === 0) return
+    Menu.buildFromTemplate(template).popup({ window: win })
+  })
+  // 渲染进程的错误级日志留给崩溃报告
+  win.webContents.on('console-message', (details) => {
+    if (!details || details.level !== 'error') return
+    rendererConsole.push(`${details.sourceId}:${String(details.lineNumber)} ${details.message}`)
   })
   // 关闭即隐藏：页面与 Host 继续运行，下次显示时还是同一个文档。
   win.on('close', (event) => {
@@ -324,25 +376,22 @@ async function startServer() {
 
   server = new DshServer({ dshPath, logFile: LOG_FILE })
   server.on('exit', ({ code, signal }) => {
+    serviceReady = false
     updateTrayMenu()
     if (quitting) return
-    notify(labels().serviceExitedTitle, format(labels().serviceExitedBody, { code: code === null ? signal : code }))
+    const reason = code === null ? signal : code
+    reportFatal(new Error(`dsh web exited (${reason})\n${server ? server.tailText : ''}`), 'host')
   })
 
   try {
     const started = await server.start()
+    serviceReady = true
     updateTrayMenu()
     if (win && !win.isDestroyed()) await win.loadURL(started.url)
     return true
   } catch (error) {
     updateTrayMenu()
-    await showMessageBoxForWindow({
-      type: 'error',
-      title: l.serviceStartFailedTitle,
-      message: l.serviceStartFailedTitle,
-      detail: `${String((error && error.message) || error).slice(0, 1200)}\n\n${format(l.serviceStartFailedBody, { path: LOG_FILE })}`,
-      buttons: [l.ok],
-    })
+    reportFatal(error, 'host')
     return false
   }
 }
@@ -369,11 +418,40 @@ function finishQuit() {
 
 async function boot() {
   localeId = app.getLocale()
+  logsDir = app.getPath('logs')
+  void pruneCrashReports(logsDir)
   try {
     fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
   } catch {
     /* 状态目录写不进去时日志会退化为不可写，但不影响启动 */
   }
+
+  fatalRecovery = new FatalRecovery({
+    messages,
+    show: (options) => showMessageBox(options),
+    stop: async () => {
+      if (server) await server.stop()
+    },
+    disablePlugins: async () => disableProfilePatches(),
+    exit: () => app.exit(1),
+    restart: () => {
+      app.relaunch()
+      app.exit(0)
+    },
+    writeReport: (error, source) =>
+      writeCrashReport(logsDir, {
+        source,
+        phase: serviceReady ? 'running' : 'startup',
+        error,
+        rendererConsole: rendererConsole.snapshot(),
+        app: appFacts(),
+        time: new Date(),
+      }),
+  })
+  process.on('uncaughtException', (error) => reportFatal(error, 'main'))
+  process.on('unhandledRejection', (reason) =>
+    reportFatal(reason instanceof Error ? reason : new Error(String(reason)), 'main'),
+  )
 
   backgroundNotice = new BackgroundNotice({
     markerPath: path.join(app.getPath('userData'), 'background-close-confirmed'),

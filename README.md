@@ -2,17 +2,6 @@
 
 `DeepSeek Harness`（`dsh`）官方只有 macOS / Windows 的 Electron 桌面端，Linux 没有打包目标。这个项目是给 Linux 用的轻量桌面壳：**把 dsh 官方 Web GUI 装进原生应用窗口**，由应用自己管理 `dsh web` 服务的生命周期。
 
-## 它和"浏览器套壳"的区别
-
-| | 浏览器 `--app` 窗口 | 本项目 |
-| --- | --- | --- |
-| 依赖 | 必须装 Chrome | 自带 Chromium（Electron），不依赖浏览器 |
-| 服务生命周期 | 靠外部脚本 / 开机自启 | 应用自己拉起、守护、退出时回收 |
-| 托盘 | 无 | 有（状态、重启、日志、开机自启、退出） |
-| 单实例 | 会开出多个窗口 | 第二次启动聚焦已有窗口 |
-| 关闭窗口 | 直接关掉页面 | 可选"隐藏到托盘"，会话继续跑 |
-| 分发 | 需要手写 .desktop | `npm run dist` 出 AppImage / deb |
-
 ## 运行
 
 ```sh
@@ -43,17 +32,21 @@ npm run pack         # 只解包到 dist/linux-unpacked，便于快速验证
 ## 结构
 
 - `src/supervisor.js`：纯 Node 的服务管理（查找 dsh、`dsh web --no-open --port 0`、解析带 token 的就绪地址、SIGTERM/SIGKILL 关停），可在无图形环境下测试
-- `src/main.js`：Electron 主进程（单实例、窗口、托盘、菜单、启动页、退出时回收服务）
+- `src/main.js`：Electron 主进程（单实例、窗口、托盘、菜单、启动页、导航拦截、右键菜单、退出时回收服务）
+- `src/locale.js` / `src/labels.js`：界面文案（前者逐字取自上游，后者是本移植版的补充条目）
+- `src/background-notice.js` / `src/quit-confirmation.js` / `src/activity.js`：关闭即隐藏、退出确认与任务探测
+- `src/command-management.js` / `src/updates.js`：管理 dsh 命令、检查并升级 dsh
+- `src/diagnostics.js` / `src/fatal-recovery.js` / `src/profile-recovery.js`：崩溃报告、原生恢复流程、备份 profile patch
+- `src/navigation.js` / `src/context-menu.js`：导航策略与右键编辑菜单
 - `src/autostart.js`：XDG autostart 开关（托盘菜单里的「开机自启」）
-- `scripts/smoke.js`：端到端自检
-- `test/`：`node --test` 单元测试
+- `scripts/smoke.js`：端到端自检；`test/`：`node --test` 单元测试
 
 ## 设计要点
 
 - **就绪地址而不是固定端口**：用 `--port 0` 让 dsh 自己挑端口，应用解析它打印的 `dsh web: <url>` 再加载，因此不会和别的服务抢 3080，也不需要 cookie 预热。
 - **窗口先出现**：先显示一个内联启动页，服务就绪后再 `loadURL`，避免点开图标后长时间没有任何反应。
 - **退出即回收**：`before-quit` 里先 SIGTERM 停掉 dsh，宽限 8 秒再 SIGKILL，避免留下孤儿服务进程。
-- **托盘可用性**：Ubuntu 自带 `ubuntu-appindicators` 扩展，Electron 托盘（StatusNotifier）可直接显示；若在没有该扩展的桌面上，关闭窗口时的确认框仍可让你选择直接退出。
+- **托盘可用性**：Ubuntu 自带 `ubuntu-appindicators` 扩展，Electron 托盘（StatusNotifier）可直接显示；如果托盘创建失败，关闭窗口会直接退出应用（而不是把窗口藏到没有入口的地方）。
 - **登录自启**：写 `~/.config/autostart/dsh-desktop.desktop`，`Exec` 指向 AppImage 或安装后的可执行文件。
 
 ## 与官方 Windows / macOS 桌面版的行为对齐
@@ -70,6 +63,10 @@ npm run pack         # 只解包到 dist/linux-unpacked，便于快速验证
 | 应用菜单 | 关于 / 检查更新 / 管理 dsh 命令… / 刷新 / 隐藏 DevTools（F12、Ctrl+Shift+I） | 相同条目（外加「重启服务」「打开日志」，因为 Linux 没有系统托盘菜单栏） |
 | 本地化 | `zh-CN` / `en`，跟随系统 | 相同，165 条文案与上游逐字一致 |
 | 关机 / 注销 | 用系统事件标记，确认框不挡关机 | 相同（`powerMonitor` 的 `shutdown` 事件） |
+| 导航策略 | 只有应用自身来源留在窗口内；外链交给系统浏览器；其它协议拦截 | 相同 |
+| 右键菜单 | 可编辑区域给撤销/重做/剪切/复制/粘贴/全选，选中文本给复制 | 相同（Electron 默认没有右键菜单，由应用补上） |
+| 致命故障 | 先落盘诊断报告，再弹原生恢复框：退出 / 重启 / 禁用第三方插件并重启；端口占用给专用文案 | 相同，报告写在 Electron 的 `logs` 目录，最多留 10 份 |
+| 渲染进程错误 | 收集错误级 console 输出，随崩溃报告一起落盘 | 相同（保留 64 KiB 尾部） |
 
 移植中的三处差异，都是环境限制而非取舍：
 
