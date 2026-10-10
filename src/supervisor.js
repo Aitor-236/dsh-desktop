@@ -26,8 +26,19 @@ function isExecutable(file) {
   }
 }
 
-/** 按 DSH_BIN → PATH → ~/.local/opt/node-* /bin → ~/.local/bin 的顺序找 dsh。 */
-function findDsh(env = process.env) {
+function realPathOrSelf(file) {
+  try {
+    return fs.realpathSync(file)
+  } catch {
+    return file
+  }
+}
+
+/**
+ * 按 DSH_BIN → PATH → ~/.local/opt/node-* /bin → ~/.local/bin 的顺序找 dsh。
+ * @param {object} [options] `exclude` 列出的路径（含其真实路径）会被跳过，用于避开自身符号链接。
+ */
+function findDsh(env = process.env, options = {}) {
   const candidates = []
   if (env.DSH_BIN) candidates.push(env.DSH_BIN)
   for (const dir of String(env.PATH || '').split(path.delimiter)) {
@@ -45,7 +56,10 @@ function findDsh(env = process.env) {
     if (entry.startsWith('node-')) candidates.push(path.join(optDir, entry, 'bin', 'dsh'))
   }
   candidates.push(path.join(home, '.local', 'bin', 'dsh'))
-  return candidates.find(isExecutable) || null
+  const blocked = (options.exclude || []).map(realPathOrSelf)
+  return (
+    candidates.find((candidate) => isExecutable(candidate) && !blocked.includes(realPathOrSelf(candidate))) || null
+  )
 }
 
 /** 从一行输出里取出带 token 的地址；不是那一行就返回 null。 */

@@ -1,6 +1,12 @@
 'use strict'
 
-const { app, BrowserWindow, Menu, Notification, Tray, dialog, nativeImage, shell } = require('electron')
+/**
+ * 主进程：把 dsh web 服务装进原生窗口，行为对齐上游 Windows/macOS 桌面版——
+ * 关闭窗口即隐藏、退出前询问是否有任务在跑、托盘常驻、单实例、菜单里的
+ * 关于 / 检查更新 / 管理 dsh 命令 / 刷新 / 开发者工具（F12）。
+ */
+
+const { app, BrowserWindow, Menu, Notification, Tray, dialog, nativeImage, powerMonitor, shell } = require('electron')
 const { execFileSync } = require('node:child_process')
 const fs = require('node:fs')
 const os = require('node:os')
@@ -8,6 +14,13 @@ const path = require('node:path')
 
 const { DshServer, findDsh } = require('./supervisor')
 const autostart = require('./autostart')
+const { messagesFor } = require('./locale')
+const { labelsFor, format } = require('./labels')
+const { BackgroundNotice } = require('./background-notice')
+const { QuitConfirmation } = require('./quit-confirmation')
+const { createActivityProbe, withDeadline } = require('./activity')
+const commandManagement = require('./command-management')
+const { checkForUpdates, fetchLatestVersion, upgradeDsh } = require('./updates')
 
 const APP_NAME = 'DeepSeek Harness'
 const ICON_FILE = path.join(__dirname, '..', 'build', 'icon.png')
@@ -15,12 +28,12 @@ const STATE_DIR = path.join(
   process.env.XDG_STATE_HOME || path.join(os.homedir(), '.local', 'state'),
   'dsh-desktop',
 )
-const CONFIG_FILE = path.join(
-  process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'),
-  'dsh-desktop',
-  'config.json',
-)
 const LOG_FILE = path.join(STATE_DIR, 'server.log')
+
+/** 上游 Windows 版的主窗口尺寸。 */
+const WINDOW_BOUNDS = { width: 1280, height: 820, minWidth: 520, minHeight: 600 }
+/** 上游给 Host 询问留的截止时间；超时按"有任务在跑"处理。 */
+const PROBE_DEADLINE_MS = 2000
 
 const SPLASH_HTML =
   'data:text/html;charset=utf-8,' +
@@ -42,33 +55,23 @@ let server = null
 let win = null
 let tray = null
 let quitting = false
-let stopInFlight = false
+let sessionEnding = false
+let backgroundNotice = null
+let quitConfirmation = null
+let localeId = 'en'
 let cachedDshVersion = null
 
-function readConfig() {
-  try {
-    return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'))
-  } catch {
-    return {}
-  }
+const messages = () => messagesFor(localeId)
+const labels = () => labelsFor(localeId)
+const activityProbe = createActivityProbe()
+
+function showMessageBox(options) {
+  return dialog.showMessageBox(options)
 }
 
-function writeConfig(patch) {
-  const next = Object.assign({}, readConfig(), patch)
-  try {
-    fs.mkdirSync(path.dirname(CONFIG_FILE), { recursive: true })
-    fs.writeFileSync(CONFIG_FILE, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 })
-  } catch {
-    /* 配置写不进去不影响使用 */
-  }
-  return next
-}
-
-/** 打包运行时的自启命令：优先 AppImage 自身，其次是可执行文件。 */
-function relaunchCommand() {
-  if (process.env.APPIMAGE) return process.env.APPIMAGE
-  if (app.isPackaged) return process.execPath
-  return null
+function showMessageBoxForWindow(options) {
+  if (win && !win.isDestroyed()) return dialog.showMessageBox(win, options)
+  return dialog.showMessageBox(options)
 }
 
 function notify(title, body) {
@@ -76,7 +79,7 @@ function notify(title, body) {
   try {
     new Notification({ title, body, icon: ICON_FILE }).show()
   } catch {
-    /* 忽略 */
+    /* 通知不可用不影响使用 */
   }
 }
 
@@ -87,188 +90,233 @@ function showWindow() {
   win.focus()
 }
 
-function askCloseBehaviour() {
-  const choice = dialog.showMessageBoxSync(win, {
-    type: 'question',
-    title: APP_NAME,
-    message: '关闭窗口后要怎么做？',
-    detail:
-      '「后台运行」：窗口隐藏到托盘，正在跑的会话继续执行，点托盘图标可以重新打开。\n' +
-      '「退出应用」：同时结束 dsh 服务，未完成的会话会中断。',
-    buttons: ['后台运行（推荐）', '退出应用'],
-    defaultId: 0,
-    cancelId: 0,
-    checkboxLabel: '记住我的选择，不再询问',
-  })
-  writeConfig({ closeToTray: choice === 0 })
-  return choice === 0
+function relaunchCommand() {
+  if (process.env.APPIMAGE) return process.env.APPIMAGE
+  if (app.isPackaged) return process.execPath
+  return null
 }
 
-function createWindow() {
-  win = new BrowserWindow({
-    width: 1440,
-    height: 900,
-    minWidth: 960,
-    minHeight: 600,
-    title: APP_NAME,
-    icon: ICON_FILE,
-    show: false,
-    backgroundColor: '#101418',
-    autoHideMenuBar: true,
-    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
-  })
+function dshVersion() {
+  if (cachedDshVersion) return cachedDshVersion
+  const dshPath = findDsh()
+  if (!dshPath) return ''
+  try {
+    cachedDshVersion = execFileSync(dshPath, ['--version'], { encoding: 'utf8' }).trim()
+  } catch {
+    cachedDshVersion = ''
+  }
+  return cachedDshVersion
+}
 
-  win.loadURL(SPLASH_HTML)
-  win.once('ready-to-show', () => win.show())
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:/.test(url)) shell.openExternal(url)
-    return { action: 'deny' }
-  })
-  win.on('close', (event) => {
-    if (quitting) return
-    const config = readConfig()
-    const toTray = config.closeToTray === undefined ? askCloseBehaviour() : Boolean(config.closeToTray)
-    if (toTray) {
-      event.preventDefault()
-      win.hide()
-      return
-    }
-    quitting = true
-    app.quit()
-  })
+function dshVersionText() {
+  const dshPath = findDsh()
+  if (!dshPath) return labels().stateStopped
+  return `${dshVersion() || '?'}（${dshPath}）`
 }
 
 function updateTrayMenu() {
   if (!tray) return
+  const m = messages()
+  const l = labels()
   const running = Boolean(server && server.running)
+  tray.setToolTip(m.aboutProduct)
   tray.setContextMenu(
     Menu.buildFromTemplate([
-      { label: `打开 ${APP_NAME}`, click: showWindow },
+      { label: m.openApplication, click: () => showWindow() },
       { type: 'separator' },
-      { label: `服务状态：${running ? '运行中' : '未运行'}`, enabled: false },
-      { label: '重启 dsh 服务', click: () => restartServer() },
-      { label: '打开服务日志', click: () => shell.openPath(LOG_FILE) },
+      { label: `${l.serviceState}: ${running ? l.stateRunning : l.stateStopped}`, enabled: false },
+      { label: l.restartService, click: () => void restartServer() },
+      { label: l.openServiceLog, click: () => void shell.openPath(LOG_FILE) },
       { type: 'separator' },
       {
-        label: '开机自启',
+        label: l.autostart,
         type: 'checkbox',
         checked: autostart.isEnabled(),
-        click: (item) => toggleAutostart(item.checked),
+        click: (item) => toggleAutostart(Boolean(item.checked)),
       },
       { type: 'separator' },
-      {
-        label: '退出',
-        click: () => {
-          quitting = true
-          app.quit()
-        },
-      },
+      { label: m.quitApplication, click: () => app.quit() },
     ]),
   )
-  tray.setToolTip(`${APP_NAME}（服务${running ? '运行中' : '未运行'}）`)
 }
 
 function createTray() {
   try {
     tray = new Tray(nativeImage.createFromPath(ICON_FILE).resize({ width: 22, height: 22 }))
-  } catch {
+  } catch (error) {
+    console.warn('desktop tray: unavailable', error)
     tray = null
     return
   }
   updateTrayMenu()
-  tray.on('click', showWindow)
+  tray.on('click', () => showWindow())
 }
 
 function toggleAutostart(enable) {
+  const l = labels()
   try {
     if (enable) {
       autostart.enable(relaunchCommand())
-      notify(APP_NAME, '已开启开机自启')
+      notify(APP_NAME, l.autostartOn)
     } else {
       autostart.disable()
-      notify(APP_NAME, '已关闭开机自启')
+      notify(APP_NAME, l.autostartOff)
     }
   } catch (error) {
-    dialog.showMessageBox({
+    void showMessageBoxForWindow({
       type: 'warning',
       title: APP_NAME,
-      message: '设置开机自启失败',
+      message: l.autostartUnavailable,
       detail: String((error && error.message) || error),
+      buttons: [l.ok],
     })
   }
   updateTrayMenu()
 }
 
-function dshVersionText() {
-  if (cachedDshVersion) return cachedDshVersion
-  const dshPath = findDsh()
-  if (!dshPath) {
-    cachedDshVersion = '未安装'
-    return cachedDshVersion
-  }
-  try {
-    cachedDshVersion = `${execFileSync(dshPath, ['--version'], { encoding: 'utf8' }).trim()}（${dshPath}）`
-  } catch {
-    cachedDshVersion = `未知（${dshPath}）`
-  }
-  return cachedDshVersion
-}
-
 function installMenu() {
+  const m = messages()
+  const l = labels()
+  const devToolsItems = [
+    { role: 'toggleDevTools', visible: false },
+    { role: 'toggleDevTools', visible: false, accelerator: 'F12' },
+  ]
   Menu.setApplicationMenu(
     Menu.buildFromTemplate([
       {
-        label: '视图',
+        label: m.application,
         submenu: [
-          { role: 'reload' },
-          { role: 'forceReload' },
-          { role: 'toggleDevTools' },
+          { label: m.aboutMenu, click: () => void showAbout() },
           { type: 'separator' },
-          { role: 'resetZoom' },
-          { role: 'zoomIn' },
-          { role: 'zoomOut' },
+          { label: m.checkUpdatesMenu, click: () => void runUpdateCheck() },
+          { label: m.cliCommandMenu, click: () => void openCommandManager() },
           { type: 'separator' },
-          { role: 'togglefullscreen' },
+          { label: l.restartService, click: () => void restartServer() },
+          {
+            label: m.reloadPageMenu,
+            click: () => {
+              if (win && !win.isDestroyed()) win.webContents.reload()
+            },
+          },
+          { label: l.openServiceLog, click: () => void shell.openPath(LOG_FILE) },
+          { type: 'separator' },
+          { label: m.exitApplication, click: () => app.quit() },
+          ...devToolsItems,
         ],
       },
-      {
-        label: '帮助',
-        submenu: [
-          {
-            label: `关于 ${APP_NAME}`,
-            click: () =>
-              dialog.showMessageBox({
-                type: 'info',
-                title: `关于 ${APP_NAME}`,
-                message: `${APP_NAME} 桌面端 ${app.getVersion()}`,
-                detail:
-                  `Electron ${process.versions.electron} / Node ${process.versions.node}\n` +
-                  `dsh：${dshVersionText()}\n` +
-                  '基于 DeepSeek Harness（dsh）官方 Web GUI 的 Linux 桌面壳。',
-                buttons: ['好'],
-              }),
-          },
-          {
-            label: 'DeepSeek Harness 项目主页',
-            click: () => shell.openExternal('https://github.com/deepseek-ai/deepseek-harness'),
-          },
-        ],
-      },
+      { role: 'editMenu' },
     ]),
   )
+  updateTrayMenu()
+}
+
+function showAbout() {
+  const l = labels()
+  return showMessageBoxForWindow({
+    type: 'info',
+    title: l.aboutTitle,
+    message: `${APP_NAME} ${app.getVersion()}`,
+    detail: [
+      format(l.appVersion, { version: app.getVersion() }),
+      format(l.dshVersion, { version: dshVersionText() }),
+      `Electron ${process.versions.electron} / Node ${process.versions.node} / Chromium ${process.versions.chrome}`,
+      '',
+      `${l.openProjectPage}: https://github.com/deepseek-ai/deepseek-harness`,
+    ].join('\n'),
+    buttons: [l.ok],
+  })
+}
+
+async function runUpdateCheck() {
+  const l = labels()
+  const installed = dshVersion()
+  if (!installed) {
+    await showMessageBoxForWindow({
+      type: 'error',
+      title: l.dshMissingTitle,
+      message: l.dshMissingTitle,
+      detail: l.dshMissingBody,
+      buttons: [l.ok],
+    })
+    return { status: 'missing' }
+  }
+  const result = await checkForUpdates({
+    dialog: { showMessageBox: (target, options) => (options ? dialog.showMessageBox(target, options) : dialog.showMessageBox(target)) },
+    window: win && !win.isDestroyed() ? win : undefined,
+    messages: messages(),
+    localeId,
+    installedVersion: installed,
+    latest: fetchLatestVersion,
+    upgrade: upgradeDsh,
+    restart: async () => {
+      cachedDshVersion = null
+      await restartServer()
+    },
+  })
+  return result
+}
+
+async function openCommandManager() {
+  await commandManagement.showCommandManager({
+    dialog: {
+      showMessageBox: (target, options) =>
+        target && !target.isDestroyed() ? dialog.showMessageBox(target, options) : dialog.showMessageBox(options),
+    },
+    window: win && !win.isDestroyed() ? win : undefined,
+    messages: messages(),
+  })
+}
+
+function createWindow() {
+  win = new BrowserWindow(
+    Object.assign({}, WINDOW_BOUNDS, {
+      title: APP_NAME,
+      icon: ICON_FILE,
+      show: false,
+      backgroundColor: '#101418',
+      autoHideMenuBar: true,
+      webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+    }),
+  )
+
+  win.loadURL(SPLASH_HTML)
+  win.once('ready-to-show', () => win.show())
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/.test(url)) void shell.openExternal(url)
+    return { action: 'deny' }
+  })
+  // 关闭即隐藏：页面与 Host 继续运行，下次显示时还是同一个文档。
+  win.on('close', (event) => {
+    if (quitting || sessionEnding) return
+    event.preventDefault()
+    const hide = () => {
+      if (!quitting && !sessionEnding && win && !win.isDestroyed()) win.hide()
+    }
+    if (!tray) {
+      // 没有托盘就没有回到窗口的入口，只能直接退出
+      quitting = true
+      app.quit()
+      return
+    }
+    backgroundNotice.close(hide)
+  })
+}
+
+function inspectForQuit() {
+  if (!server || !server.running) return undefined
+  return withDeadline(activityProbe(), PROBE_DEADLINE_MS, 'unknown')
 }
 
 async function startServer() {
+  const l = labels()
   const dshPath = findDsh()
   if (!dshPath) {
-    dialog.showMessageBoxSync({
+    await showMessageBoxForWindow({
       type: 'error',
-      title: APP_NAME,
-      message: '找不到 dsh 命令',
-      detail:
-        '请先安装 dsh：\n\n    npm i -g @deepseek-ai/dsh\n\n' +
-        '安装完成后，用托盘菜单里的「重启 dsh 服务」重试。',
-      buttons: ['好'],
+      title: l.dshMissingTitle,
+      message: l.dshMissingTitle,
+      detail: l.dshMissingBody,
+      buttons: [l.ok],
     })
     updateTrayMenu()
     return false
@@ -278,7 +326,7 @@ async function startServer() {
   server.on('exit', ({ code, signal }) => {
     updateTrayMenu()
     if (quitting) return
-    notify(`${APP_NAME} 服务已退出`, `dsh web（${code === null ? signal : code}）已停止，可从托盘菜单重启`)
+    notify(labels().serviceExitedTitle, format(labels().serviceExitedBody, { code: code === null ? signal : code }))
   })
 
   try {
@@ -288,12 +336,12 @@ async function startServer() {
     return true
   } catch (error) {
     updateTrayMenu()
-    dialog.showMessageBox({
+    await showMessageBoxForWindow({
       type: 'error',
-      title: APP_NAME,
-      message: 'dsh 服务启动失败',
-      detail: `${String((error && error.message) || error).slice(0, 1500)}\n\n完整日志：${LOG_FILE}`,
-      buttons: ['好'],
+      title: l.serviceStartFailedTitle,
+      message: l.serviceStartFailedTitle,
+      detail: `${String((error && error.message) || error).slice(0, 1200)}\n\n${format(l.serviceStartFailedBody, { path: LOG_FILE })}`,
+      buttons: [l.ok],
     })
     return false
   }
@@ -303,6 +351,55 @@ async function restartServer() {
   if (server) await server.stop()
   await startServer()
   showWindow()
+}
+
+function finishQuit() {
+  if (quitting) return
+  quitting = true
+  if (quitConfirmation) quitConfirmation.dispose()
+  if (backgroundNotice) backgroundNotice.dispose()
+  if (tray) {
+    tray.destroy()
+    tray = null
+  }
+  const done = () => app.quit()
+  if (server && server.running) server.stop().finally(done)
+  else done()
+}
+
+async function boot() {
+  localeId = app.getLocale()
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
+  } catch {
+    /* 状态目录写不进去时日志会退化为不可写，但不影响启动 */
+  }
+
+  backgroundNotice = new BackgroundNotice({
+    markerPath: path.join(app.getPath('userData'), 'background-close-confirmed'),
+    messages,
+    show: (options) => showMessageBox(options),
+    focus: () => showWindow(),
+  })
+  quitConfirmation = new QuitConfirmation({
+    messages,
+    inspect: inspectForQuit,
+    show: (options) => showMessageBox(options),
+    focus: () => showWindow(),
+  })
+
+  if (powerMonitor && typeof powerMonitor.on === 'function') {
+    // 关机 / 注销不能等确认框
+    powerMonitor.on('shutdown', () => {
+      sessionEnding = true
+    })
+  }
+
+  installMenu()
+  createWindow()
+  createTray()
+  await startServer()
+  app.on('activate', () => showWindow())
 }
 
 const gotLock = app.requestSingleInstanceLock()
@@ -315,30 +412,26 @@ if (!gotLock) {
   app.on('second-instance', () => showWindow())
 
   app.on('window-all-closed', () => {
-    // 关闭窗口不等于退出：只有显式退出（托盘菜单或关闭对话框）才结束进程
+    // 关闭窗口不等于退出：只有显式退出才结束进程
   })
 
   app.on('before-quit', (event) => {
-    quitting = true
-    if (stopInFlight || !server || !server.running) return
+    if (quitting) return
     event.preventDefault()
-    stopInFlight = true
-    server.stop().finally(() => {
-      stopInFlight = false
-      app.quit()
-    })
+    if (sessionEnding) {
+      finishQuit()
+      return
+    }
+    void quitConfirmation
+      .confirm()
+      .then((approved) => {
+        if (approved) finishQuit()
+      })
+      .catch((error) => {
+        console.error('desktop quit: confirmation failed', error)
+        finishQuit()
+      })
   })
 
-  app.whenReady().then(async () => {
-    try {
-      fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
-    } catch {
-      /* 忽略 */
-    }
-    installMenu()
-    createWindow()
-    createTray()
-    await startServer()
-    app.on('activate', () => showWindow())
-  })
+  void app.whenReady().then(boot)
 }

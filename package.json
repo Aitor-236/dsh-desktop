@@ -1,7 +1,7 @@
 {
   "name": "dsh-desktop",
   "productName": "DeepSeek Harness",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "DeepSeek Harness（dsh）的 Linux 桌面壳：内置 dsh web 服务、托盘、单实例、开机自启",
   "private": true,
   "license": "MIT",
